@@ -1,0 +1,265 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Partner {
+  id           String     @id @default(cuid())
+  code         String     @unique  // p2096 형식
+  name         String
+  email        String?
+  passwordHash String
+  grade        String     @default("1차")  // 1차, 2차, 3차
+  phone        String?
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  orders     Order[]
+  deliveries Delivery[]
+  invoices   Invoice[]
+  items      Item[]
+  plans      PlanLine[]
+  sagubTxns  SagubTxn[]
+}
+
+// 발주사(엠티에스) 직원 계정
+model Admin {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  name         String
+  dept         String?
+  passwordHash String
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Notice {
+  id        String   @id @default(cuid())
+  category  String   @default("일반") // 중요, 공지, 일반
+  title     String
+  content   String
+  author    String
+  views     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attachments Attachment[]
+}
+
+// 품목 마스터. ASSY = 협력사가 만들어 납품하는 도번, PART = 그 구성 자도번(사급자재 포함)
+model Item {
+  id        String   @id @default(cuid())
+  code      String   @unique // P/No
+  name      String
+  spec      String?
+  unit      String   @default("EA")
+  kind      ItemKind
+  model     String?
+  unitPrice Int      @default(0) // ASSY: 납품(매입) 단가, PART: 유상사급 판매 단가
+  sagubType String?  // PART 중 발주사가 지급하는 자재: 무상 | 유상
+  partnerId String?  // ASSY 담당 협력사(작업처)
+  partner   Partner? @relation(fields: [partnerId], references: [id])
+  stdPack   Int?     // 표준포장수
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bomChildren BomLine[]  @relation("BomParent")
+  bomParents  BomLine[]  @relation("BomChild")
+  plans       PlanLine[]
+  deliveries  Delivery[]
+  sagubTxns   SagubTxn[]
+}
+
+model BomLine {
+  id       String @id @default(cuid())
+  parentId String
+  parent   Item   @relation("BomParent", fields: [parentId], references: [id], onDelete: Cascade)
+  childId  String
+  child    Item   @relation("BomChild", fields: [childId], references: [id], onDelete: Cascade)
+  qtyPer   Float  // 도번 1개당 사용수량
+
+  @@unique([parentId, childId])
+}
+
+// 협력사·도번·일자별 생산(납품) 계획수량
+model PlanLine {
+  id        String   @id @default(cuid())
+  partnerId String
+  partner   Partner  @relation(fields: [partnerId], references: [id])
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id])
+  planDate  DateTime @db.Date
+  qty       Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([partnerId, itemId, planDate])
+  @@index([partnerId, planDate])
+}
+
+// 사급자재 수불. ISSUE = 발주사 불출(협력사 입고), CONSUME = 납품 입고 시 BOM 기준 소진(협력사 출고)
+model SagubTxn {
+  id         String    @id @default(cuid())
+  partnerId  String
+  partner    Partner   @relation(fields: [partnerId], references: [id])
+  itemId     String
+  item       Item      @relation(fields: [itemId], references: [id])
+  txnDate    DateTime  @db.Date
+  type       SagubType
+  qty        Float     // ISSUE·CONSUME는 양수, ADJUST는 증감 부호 그대로
+  unitPrice  Int       @default(0) // 불출 당시 유상 단가(매출마감용), 무상이면 0
+  deliveryId String?
+  delivery   Delivery? @relation(fields: [deliveryId], references: [id], onDelete: SetNull)
+  note       String?
+  createdBy  String
+  createdAt  DateTime  @default(now())
+
+  @@index([partnerId, itemId, txnDate])
+}
+
+model Order {
+  id         String      @id @default(cuid())
+  orderNo    String      @unique // PO-2026-0001 형식
+  partnerId  String
+  partner    Partner     @relation(fields: [partnerId], references: [id])
+  itemCode   String
+  itemName   String
+  spec       String?
+  unit       String      @default("EA")
+  quantity   Int
+  unitPrice  Int
+  totalPrice Int
+  dueDate    DateTime
+  status     OrderStatus @default(PENDING)
+  note       String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  deliveries  Delivery[]
+  attachments Attachment[]
+}
+
+// 거래명세서(납품 1건 = 품목 1줄). 생산계획 기준이면 itemId, 발주서 기준이면 orderId가 있다
+model Delivery {
+  id            String         @id @default(cuid())
+  deliveryNo    String         @unique // DN-2026-0001 형식, 바코드 값
+  partnerId     String
+  partner       Partner        @relation(fields: [partnerId], references: [id])
+  orderId       String?
+  order         Order?         @relation(fields: [orderId], references: [id])
+  itemId        String?
+  item          Item?          @relation(fields: [itemId], references: [id])
+  // 발행 시점 품목·단가 스냅샷 — 이후 마스터가 바뀌어도 명세서 금액은 그대로
+  itemCode      String
+  itemName      String
+  spec          String?
+  unit          String         @default("EA")
+  unitPrice     Int
+  deliveredQty  Int
+  packQty       Int?
+  deliveryDate  DateTime
+  vehicle       String?
+  status        DeliveryStatus @default(SUBMITTED)
+  receivedAt    DateTime?
+  inspectResult InspectResult?
+  passQty       Int?
+  failQty       Int?
+  inspectNote   String?
+  inspectedAt   DateTime?
+  inspectedBy   String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  invoices    Invoice[]
+  attachments Attachment[]
+  sagubTxns   SagubTxn[]
+}
+
+// 발주·납품·공지에 붙는 파일. 실제 파일은 storage/uploads 아래 storageKey 경로에 저장
+model Attachment {
+  id           String    @id @default(cuid())
+  kind         String    // ORDER_DOC, DRAWING, STATEMENT, QC_REPORT, MILL_SHEET, INSPECTION, NOTICE, ETC
+  fileName     String
+  mimeType     String
+  size         Int
+  storageKey   String    @unique
+  uploaderRole String    // partner | admin
+  uploaderId   String
+  uploadedBy   String
+  orderId      String?
+  order        Order?    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  deliveryId   String?
+  delivery     Delivery? @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+  noticeId     String?
+  notice       Notice?   @relation(fields: [noticeId], references: [id], onDelete: Cascade)
+  createdAt    DateTime  @default(now())
+
+  @@index([orderId])
+  @@index([deliveryId])
+  @@index([noticeId])
+}
+
+model Invoice {
+  id             String        @id @default(cuid())
+  invoiceNo      String        @unique // INV-2026-0001 형식
+  deliveryId     String
+  delivery       Delivery      @relation(fields: [deliveryId], references: [id])
+  partnerId      String
+  partner        Partner       @relation(fields: [partnerId], references: [id])
+  supplyAmount   Int
+  taxAmount      Int
+  totalAmount    Int
+  issueDate      DateTime
+  paymentDueDate DateTime?
+  paidAt         DateTime?
+  status         InvoiceStatus @default(ISSUED)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+}
+
+enum ItemKind {
+  ASSY
+  PART
+}
+
+enum SagubType {
+  ISSUE
+  CONSUME
+  ADJUST
+}
+
+enum OrderStatus {
+  PENDING    // 발주(납품 대기)
+  DELIVERING // 명세서 발행
+  DELIVERED  // 입고
+  PASSED     // 검수완료
+  SETTLED    // 정산완료
+  CANCELLED  // 취소
+}
+
+enum DeliveryStatus {
+  SUBMITTED  // 발행(입고 전)
+  INSPECTING // 입고·검수중
+  PASSED     // 합격
+  FAILED     // 불합격
+}
+
+enum InspectResult {
+  PASS
+  FAIL
+  PARTIAL
+}
+
+enum InvoiceStatus {
+  ISSUED    // 발행완료
+  REVIEWING // 검토중
+  APPROVED  // 지급확정
+  PAID      // 지급완료
+}
